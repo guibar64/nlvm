@@ -589,6 +589,26 @@ proc isArrayPtr(t: llvm.TypeRef): bool =
   t.getTypeKind() == llvm.PointerTypeKind and
     t.getElementType().getTypeKind() == llvm.ArrayTypeKind
 
+proc addressSpace(g: LLGen, typ: PType): cuint =
+  if g.config.target.targetCpu == cpuNvptx64:
+    # (tyPtr (region elem))
+    if typ.len > 1 and typ[0].kind == tyObject:
+      # The region objects could be defined in the wrong module but how could it be a different intention ?
+      if cmpIgnoreStyle(typ[0].sym.name.s, "Global") == 0:
+        1
+      elif cmpIgnoreStyle(typ[0].sym.name.s, "Shared") == 0:
+        3
+      elif cmpIgnoreStyle(typ[0].sym.name.s, "Private") == 0:
+        5
+      elif cmpIgnoreStyle(typ[0].sym.name.s, "Constant") == 0:
+        4
+      else:
+        0
+    else:
+      0
+  else:
+    0
+
 # Int constant suitable for indexing into structs when doing GEP
 # Has to be i32 per LLVM docs
 proc constGEPIdx(g: LLGen, val: int): llvm.ValueRef =
@@ -1290,7 +1310,7 @@ proc llType(g: LLGen, typ: PType): llvm.TypeRef =
     if size <= 8: llvm.intTypeInContext(g.lc, size * 8)
     else: llvm.arrayType(llvm.int8TypeInContext(g.lc), size)
   of tyRange: g.llType(typ.sons[0])
-  of tyPtr, tyRef, tyVar, tyLent: g.llType(typ.elemType).pointerType()
+  of tyPtr, tyRef, tyVar, tyLent: g.llType(typ.elemType).pointerType(g.addressSpace(typ))
   of tySequence:
     var st: llvm.TypeRef
 
@@ -3095,6 +3115,15 @@ proc genFunction(g: LLGen, s: PSym): LLValue =
   result = LLValue(v: f, storage: s.loc.storage)
   g.symbols[s.id] = result
 
+proc isKernel(s: PSym): bool =
+  result = false
+  let pragmas = s.ast[4]
+  for p in pragmas:
+    # It seems the pragma is a Call after macro tranf and sem
+    let n = if p.kind == nkCall and p[0].kind == nkSym: p[0] elif p.kind == nkSym: p else: nil 
+    result = n != nil and cmpIgnoreStyle(n.sym.name.s, "kerneltag") == 0
+    if result: break
+
 proc genFunctionWithBody(g: LLGen, s: PSym): LLValue =
   var s = s
   if lfImportCompilerProc in s.loc.flags:
@@ -3118,6 +3147,15 @@ proc genFunctionWithBody(g: LLGen, s: PSym): LLValue =
     # they need to be exported to C - this might change if we start supporting
     # dll:s
     result.v.setLinkage(llvm.InternalLinkage)
+  if g.graph.config.target.targetCpu == cpuNvptx64 and isKernel(s):
+    result.v.setLinkage(llvm.ExternalLinkage)
+    const annot = "nvvm.annotations"
+    let nvvmMD = g.m.getOrInsertNamedMetadata(annot.cstring, annot.len.csize_t)
+    const kernStr = "kernel"
+    var tupleMD = [valueAsMetadata(result.v), g.lc.mDStringInContext2(kernStr.cstring, kernStr.len), valueAsMetaData(g.constInt32(1'i32))]
+    let mdNode = g.lc.mDNodeInContext2(addr tupleMD[0], tupleMD.len.csize_t)
+    g.m.addNamedMetadataOperand(annot.cstring, g.lc.metaDataAsValue(mdNode))
+
 
   let
     typ = s.typ.skipTypes(abstractInst)
@@ -5406,6 +5444,7 @@ proc genMagic(g: LLGen, n: PNode, load: bool, tgt: LLValue): LLValue =
   of mSpawn: result = g.genMagicSpawn(n)
   of mDeepCopy: g.genMagicDeepCopy(n)
   of mGetTypeInfo: result = g.genMagicGetTypeInfo(n)
+  # of mDestroy: 
   else: g.config.internalError(n.info, "Unhandled magic: " & $op)
 
 # Nodes
@@ -6088,7 +6127,10 @@ proc genNodeConv(g: LLGen, n: PNode, load: bool): LLValue =
   elif vtk == llvm.FloatTypeKind and ntk == llvm.DoubleTypeKind:
     LLValue(v: g.b.buildFPExt(v.v, nt, g.nn("conv.fd", n)))
   elif vtk == llvm.PointerTypeKind and ntk == llvm.PointerTypeKind:
-    LLValue(v: g.b.buildBitCast(v.v, nt, g.nn("conv.pointer", n)))
+    if g.config.target.targetCpu == cpuNvptx64 and vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
+      LLValue(v: g.b.buildAddrSpaceCast(v.v, nt, g.nn("conv.pointer", n)))
+    else:
+      LLValue(v: g.b.buildBitCast(v.v, nt, g.nn("conv.pointer", n)))
   elif n.typ.kind == tyProc and ntk == llvm.PointerTypeKind or nt == g.closureType:
     LLValue(v: g.b.buildBitCast(v.v, g.voidPtrType, g.nn("conv.proc", n)))
   elif vtk == llvm.DoubleTypeKind and ntk == llvm.FloatTypeKind:
@@ -6119,7 +6161,10 @@ proc genNodeCast(g: LLGen, n: PNode, load: bool): LLValue =
     elif vtk == llvm.IntegerTypeKind and ntk == llvm.IntegerTypeKind:
       g.buildTruncOrExt(v, nt, ntyp)
     elif vtk == llvm.PointerTypeKind and ntk == llvm.PointerTypeKind:
-      g.b.buildBitCast(v, nt, g.nn("cast.bit", n))
+      if g.config.target.targetCpu == cpuNvptx64 and vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
+        g.b.buildAddrSpaceCast(v, nt, g.nn("cast.asp", n))
+      else:
+        g.b.buildBitCast(v, nt, g.nn("cast.bit", n))
     else:
       let
         dl = g.m.getModuleDataLayout()
@@ -7295,9 +7340,37 @@ proc loadBase(g: LLGen) =
         [platform.CPU[g.config.target.targetCPU].name,
         platform.OS[g.config.target.targetOS].name]
     m = parseIRInContext(g.lc, base)
-
   if g.m.linkModules2(m) != 0:
     g.config.internalError("module link failed")
+
+  if g.config.target.targetCpu == cpuNvptx64:
+    # libdvice optimiztion 'flush subnormals to zero'
+    let nvvmFtz: int32 = if g.config.existsConfigVar("nlvm.cuda.ftz"): 1 else: 0
+    const annot = "llvm-module-flag"
+    let nvvmMD = g.m.getOrInsertNamedMetadata(annot.cstring, annot.len.csize_t)
+    const reflectStr = "nvvm-reflect-ftz"
+    # 4 is for overrinding the value in another linked module
+    var tupleMD = [valueAsMetaData(g.constInt32(4'i32)), g.lc.mDStringInContext2(reflectStr.cstring, reflectStr.len), valueAsMetaData(g.constInt32(nvvmFtz))]
+    let mdNode = g.lc.mDNodeInContext2(addr tupleMD[0], tupleMD.len.csize_t)
+    g.m.addNamedMetadataOperand(annot.cstring, g.lc.metaDataAsValue(mdNode))
+
+    if not g.config.existsConfigVar("nlvm.cuda.nolibdevice"):
+      var libdeviceFn = ""
+      if g.config.existsConfigVar("nlvm.cuda.libdevice")
+        libdeviceFn = g.config.getConfigVar("nlvm.cuda.libdevice")
+      else:
+        let cudaBase = if g.config.existsConfigVar("nlvm.cuda.path"): g.config.getConfigVar("nlvm.cuda.path") elif defined(linux): "/opt/cuda" else: ""
+        letlibdevicedir = cudaBase / "nvvm" / "libdevice"
+        if dirExists(libdeviceDir):
+          for fn in walkPattern(libdeviceDir / "libdevice.*.bc"):
+            libdeviceFn = fn
+            break
+      if libdeviceFn.len > 0 and fileExists(libdeviceFn):
+        let m = parseIRInContext(g.lc, libdeviceFn)
+        if g.m.linkModules2(m) != 0:
+          g.config.internalError("libdevice link failed. ")
+      else:
+        rawMessage(g.config, errUser, "Cannot find libdevice. Adjust 'nlvm.cuda.path'  or use option 'nlvm.cuda.nolibdevice' to not link againt it")
 
 proc runOptimizers(g: LLGen) =
   if {optOptimizeSpeed, optOptimizeSize} * g.config.options == {}:
@@ -7335,7 +7408,8 @@ proc writeOutput(g: LLGen, project: string) =
     if optCompileOnly in g.config.globalOptions:
       ".ll"
     elif optNoLinking in g.config.globalOptions:
-      ".o"
+      if g.config.target.targetCPU == cpuNvptx64: ".ptx"
+      else: ".o"
     else:
       ""
 
@@ -7355,7 +7429,7 @@ proc writeOutput(g: LLGen, project: string) =
     else:
       g.config.completeCFilePath(AbsoluteFile(project & ".o")).string
 
-  if llvm.targetMachineEmitToFile(g.tm, g.m, ofile, llvm.ObjectFile,
+  if llvm.targetMachineEmitToFile(g.tm, g.m, ofile, if g.config.target.targetCpu == cpuNvptx64: llvm.AssemblyFile else: llvm.ObjectFile,
     cast[cstringArray](addr(err))) == llvm.True:
     g.config.internalError($err)
     return
@@ -7429,7 +7503,8 @@ proc myClose(graph: ModuleGraph, b: PPassContext, n: PNode): PNode =
       g.withFunc(m.init):
         g.finalize()
 
-  g.genMain()
+  g.withModule(pc):
+    g.genMain()
 
   for m in g.markerBody:
     g.genMarkerProcBody(m[0], m[1])
@@ -7543,8 +7618,9 @@ proc myOpen(graph: ModuleGraph, s: PSym): PPassContext =
       cgl =
         if optOptimizeSpeed in graph.config.options: llvm.CodeGenLevelAggressive
         else: llvm.CodeGenLevelDefault
+      mcpu = if graph.config.existsConfigVar("nlvm.cpu"): graph.config.getConfigVar("nlvm.cpu") else: ""
       tm = createTargetMachine(
-        tr, target, "", "", cgl, reloc, llvm.CodeModelDefault)
+        tr, target, mcpu, "", cgl, reloc, llvm.CodeModelDefault)
       layout = tm.createTargetDataLayout()
       g = newLLGen(graph, target, tm)
 

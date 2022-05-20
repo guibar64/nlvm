@@ -24,7 +24,7 @@ const
       @["sparc"],
       @["vm"], # ?
       @["hppa"], # ?
-      @["ia64"], # ?
+      @["ia64", "nvptx64"], # ?  !! nvptx64 should be its own target…
       @["x86_64", "amd64"],
       @["mips"],
       @["mips64el"],
@@ -44,7 +44,7 @@ const
     ]
   osNames: array[TSystemOS, seq[string]] =
     [
-      @["unknown"],
+      @["unknown"], 
       @["dos"], # ?
       @["windows"],
       @["os2"], # ?
@@ -72,7 +72,7 @@ const
       @["genode"], # ?
       @["js"], # ?
       @["nimvm"], # ?
-      @["unknown"], # ?
+      @["unknown","nvidia"], # ? # !! standalone for nvidia
       @["nintendoswitch"], # ?,
       @["freertos"], # ?,
       @["any"]
@@ -110,3 +110,6 @@ proc parseTarget*(target: string): tuple[cpu: TSystemCPU, os: TSystemOS] =
         if t.contains(name): os = xos
 
     (cpu, os)
+
+# Before adding it to platform.nim?
+const cpuNvptx64* = cpuIa64
