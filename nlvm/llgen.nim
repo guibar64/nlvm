@@ -1906,6 +1906,9 @@ proc genNodeInfo(g: LLGen, t: PType): llvm.ValueRef
 proc genObjectNodeInfo(g: LLGen, t: PType, n: PNode, suffix: string): llvm.ValueRef
 proc genTypeInfo(g: LLGen, t: PType): llvm.ValueRef
 
+proc genTypeInfoNVPTX(g: LLGen, t: PType): llvm.ValueRef
+proc genNodeInfoNVPTX(g: LLGen, t: PType): llvm.ValueRef
+
 proc constNimNodeNone(g: LLGen, length: int): llvm.ValueRef =
   let
     tnn = g.llMagicType("TNimNode")
@@ -2135,6 +2138,7 @@ proc fakeClosureType(g: LLGen, owner: PSym): PType =
   result.rawAddSon(r)
 
 proc genNodeInfo(g: LLGen, t: PType): llvm.ValueRef =
+  if g.config.target.targetCPU == cpuNvptx64: return genNodeInfoNVPTX(g, t)
   let tnn = g.llMagicType("TNimNode")
 
   case t.kind
@@ -2160,6 +2164,7 @@ proc genTypeInfoBase(g: LLGen, t: PType): llvm.ValueRef =
     result = g.llMagicType("TNimType").pointerType().constNull()
 
 proc genTypeInfo(g: LLGen, t: PType): llvm.ValueRef =
+  if g.config.target.targetCPU == cpuNvptx64: return genTypeInfoNVPTX(g, t)
   var t = t.skipTypes(irrelevantForBackend + tyUserTypeClasses)
   let sig = hashType(t)
   if sig in g.typeInfos:
@@ -3176,7 +3181,7 @@ proc genFunctionWithBody(g: LLGen, s: PSym): LLValue =
     # they need to be exported to C - this might change if we start supporting
     # dll:s
     result.v.setLinkage(llvm.InternalLinkage)
-  if g.graph.config.target.targetCpu == cpuNvptx64 and isKernel(s):
+  if g.graph.config.target.targetCPU == cpuNvptx64 and isKernel(s):
     result.v.setLinkage(llvm.ExternalLinkage)
     const annot = "nvvm.annotations"
     let nvvmMD = g.m.getOrInsertNamedMetadata(annot.cstring, annot.len.csize_t)
@@ -6206,7 +6211,7 @@ proc genNodeConv(g: LLGen, n: PNode, load: bool): LLValue =
   elif vtk == llvm.FloatTypeKind and ntk == llvm.DoubleTypeKind:
     LLValue(v: g.b.buildFPExt(v.v, nt, g.nn("conv.fd", n)))
   elif vtk == llvm.PointerTypeKind and ntk == llvm.PointerTypeKind:
-    if g.config.target.targetCpu == cpuNvptx64 and vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
+    if g.config.target.targetCPU == cpuNvptx64 and vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
       LLValue(v: g.b.buildAddrSpaceCast(v.v, nt, g.nn("conv.pointer", n)))
     else:
       LLValue(v: g.b.buildBitCast(v.v, nt, g.nn("conv.pointer", n)))
@@ -6240,7 +6245,7 @@ proc genNodeCast(g: LLGen, n: PNode, load: bool): LLValue =
     elif vtk == llvm.IntegerTypeKind and ntk == llvm.IntegerTypeKind:
       g.buildTruncOrExt(v, nt, ntyp)
     elif vtk == llvm.PointerTypeKind and ntk == llvm.PointerTypeKind:
-      if g.config.target.targetCpu == cpuNvptx64 and vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
+      if g.config.target.targetCPU == cpuNvptx64 and vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
         g.b.buildAddrSpaceCast(v, nt, g.nn("cast.asp", n))
       else:
         g.b.buildBitCast(v, nt, g.nn("cast.bit", n))
@@ -7409,7 +7414,7 @@ proc loadBase(g: LLGen) =
   if g.m.linkModules2(m) != 0:
     g.config.internalError("module link failed")
 
-  if g.config.target.targetCpu == cpuNvptx64:
+  if g.config.target.targetCPU == cpuNvptx64:
     # libdvice optimiztion 'flush subnormals to zero'
     let nvvmFtz: int32 = if g.config.existsConfigVar("nlvm.cuda.ftz"): 1 else: 0
     const annot = "llvm-module-flag"
@@ -7495,7 +7500,7 @@ proc writeOutput(g: LLGen, project: string) =
     else:
       g.config.completeCFilePath(AbsoluteFile(project & ".o")).string
 
-  if llvm.targetMachineEmitToFile(g.tm, g.m, ofile, if g.config.target.targetCpu == cpuNvptx64: llvm.AssemblyFile else: llvm.ObjectFile,
+  if llvm.targetMachineEmitToFile(g.tm, g.m, ofile, if g.config.target.targetCPU == cpuNvptx64: llvm.AssemblyFile else: llvm.ObjectFile,
     cast[cstringArray](addr(err))) == llvm.True:
     g.config.internalError($err)
     return
@@ -7704,3 +7709,29 @@ proc myOpen(graph: ModuleGraph, s: PSym, idgen: IdGenerator): PPassContext =
   g.modules[s.position]
 
 const llgenPass* = makePass(myOpen, myProcess, myClose)
+
+
+# workarounds for the NVPTX codegen
+
+# LLVM->PTX codegen chocks with 'Circular dependency found in global variable set'
+# They are not really used for now, so let us nullify them
+
+proc genNodeInfoNVPTX(g: LLGen, t: PType): llvm.ValueRef =
+  let sig = hashType(t)
+  if sig in g.nodeInfos:
+    return g.nodeInfos[sig]
+  let name = ".nodeinfo." & g.llName(t, sig)
+  let tnn = g.llMagicType("TNimNode")
+  g.m.addPrivateConstant(tnn, name)
+
+proc genTypeInfoNVPTX(g: LLGen, t: PType): llvm.ValueRef =
+  var t = t.skipTypes(irrelevantForBackend + tyUserTypeClasses)
+  let sig = hashType(t)
+  if sig in g.typeInfos:
+    return g.typeInfos[sig]
+  let name = ".typeinfo." & g.llName(t, sig)
+  let
+    ntlt = g.llMagicType("TNimType")
+    lt = if t.kind == tyEmpty: nil else: g.llType(t)
+    els = ntlt.getStructElementTypes()
+  g.m.addPrivateConstant(ntlt, name)
