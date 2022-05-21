@@ -7422,11 +7422,11 @@ proc loadBase(g: LLGen) =
 
     if not g.config.existsConfigVar("nlvm.cuda.nolibdevice"):
       var libdeviceFn = ""
-      if g.config.existsConfigVar("nlvm.cuda.libdevice")
+      if g.config.existsConfigVar("nlvm.cuda.libdevice"):
         libdeviceFn = g.config.getConfigVar("nlvm.cuda.libdevice")
       else:
         let cudaBase = if g.config.existsConfigVar("nlvm.cuda.path"): g.config.getConfigVar("nlvm.cuda.path") elif defined(linux): "/opt/cuda" else: ""
-        letlibdevicedir = cudaBase / "nvvm" / "libdevice"
+        let libdevicedir = cudaBase / "nvvm" / "libdevice"
         if dirExists(libdeviceDir):
           for fn in walkPattern(libdeviceDir / "libdevice.*.bc"):
             libdeviceFn = fn
