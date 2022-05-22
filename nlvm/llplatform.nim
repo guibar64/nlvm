@@ -73,11 +73,11 @@ const
       @["genode"], # ?
       @["js"], # ?
       @["nimvm"], # ?
-      @["unknown","nvidia"], # ? # !! standalone for nvidia
+      @["unknown"], # ?
       @["nintendoswitch"], # ?,
       @["freertos"], # ?,
       @["zephyr"], # ?
-      @["any"]
+      @["any","nvidia"]
     ]
 
 proc toTriple*(cpu: TSystemCPU, os: TSystemOS): string =
