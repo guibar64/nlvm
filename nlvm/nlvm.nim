@@ -218,6 +218,12 @@ proc mainCommand*(graph: ModuleGraph) =
 
   # TODO setId(100)
 
+  if conf.existsConfigVar("nlvm.target") and conf.getConfigVar("nlvm.target") == "nvptx64-nvidia-cuda":
+    # short circuit here to avoid ident the whole of nlvm_system
+    undefSymbol(conf.symbols, "nlvm")
+    defineSymbol(conf.symbols, "cuda")
+    defineSymbol(conf.symbols, "nvptx64")
+
   # lib/pure/bitops.num
   defineSymbol(conf.symbols, "noIntrinsicsBitOpts")
 
