@@ -2409,6 +2409,13 @@ proc isNimSeqLike(g: LLGen, t: llvm.TypeRef): bool =
 
   true
 
+
+proc pointerCast(g: LLGen, v: llvm.ValueRef, t: llvm.TypeRef, name: string): llvm.ValueRef =
+  if v.typeOfX().getPointerAddressSpace() != t.getPointerAddressSpace():
+    g.b.buildAddrSpaceCast(v, t, g.nn(name, v))
+  else:
+    g.b.buildBitCast(v, t, g.nn(name, v))
+
 proc preCast(
     g: LLGen, unsigned: bool, ax: llvm.ValueRef, t: PType,
     lt: llvm.TypeRef = nil): llvm.ValueRef =
@@ -2431,7 +2438,8 @@ proc preCast(
     return g.getNimSeqDataPtr(ax)
 
   if ltk == PointerTypeKind and atk == PointerTypeKind:
-    return g.b.buildBitCast(ax, lt, g.nn("pre", ax))
+    #return g.b.buildBitCast(ax, lt, g.nn("pre", ax))
+    return g.pointerCast(ax, lt, "pre")
 
   if ltk == IntegerTypeKind and atk == IntegerTypeKind and
       at.getIntTypeWidth() != lt.getIntTypeWidth():
@@ -2517,7 +2525,7 @@ proc genGlobal(g: LLGen, n: PNode, isConst: bool): LLValue =
 
   let
     t = g.llType(s.typ.skipTypes(abstractInst))
-    v = g.m.addGlobal(t, s.llName)
+    v = if g.config.target.targetCpu == cpuNvptx64: g.m.addGlobalInAddressSpace(t, s.llName, 1) else: g.m.addGlobal(t, s.llName)
 
   if sfImportc in s.flags:
     v.setLinkage(llvm.ExternalLinkage)
@@ -2636,8 +2644,9 @@ proc callMemset(g: LLGen, tgt, v, len: llvm.ValueRef) =
 
 proc callMemcpy(g: LLGen, tgt, src, len: llvm.ValueRef) =
   let
-    t = g.b.buildBitCast(tgt, g.voidPtrType, g.nn("memcpy.tgt", tgt))
-    s = g.b.buildBitCast(src, g.voidPtrType, g.nn("memcpy.src", src))
+    t = g.pointerCast(tgt, g.voidPtrType, "memcmp.tgt") #g.b.buildBitCast(tgt, g.voidPtrType, g.nn("memcpy.tgt", tgt))
+    s = g.pointerCast(src, g.voidPtrType, "memcmp.src")
+    #s = g.b.buildBitCast(src, g.voidPtrType, g.nn("memcpy.src", src))
 
   if len.typeOfX().getIntTypeWidth() == 64:
     let
@@ -6245,7 +6254,7 @@ proc genNodeCast(g: LLGen, n: PNode, load: bool): LLValue =
     elif vtk == llvm.IntegerTypeKind and ntk == llvm.IntegerTypeKind:
       g.buildTruncOrExt(v, nt, ntyp)
     elif vtk == llvm.PointerTypeKind and ntk == llvm.PointerTypeKind:
-      if g.config.target.targetCPU == cpuNvptx64 and vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
+      if vt.getPointerAddressSpace() != nt.getPointerAddressSpace():
         g.b.buildAddrSpaceCast(v, nt, g.nn("cast.asp", n))
       else:
         g.b.buildBitCast(v, nt, g.nn("cast.bit", n))
