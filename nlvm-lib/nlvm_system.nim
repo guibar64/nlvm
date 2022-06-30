@@ -35,8 +35,20 @@ const
 
   nlvmExceptionClass = 0x6e6c766d6e696d00'u64 # nlvmnim\0 (TODO: endian?)
 
-# Need these for the runtime type information
-include system/inclrtl, system/hti
+when defined(gcDestructors):
+  type    
+    TNimTypeV2 {.compilerproc.} = object
+      destructor: pointer
+      size: int
+      align: int
+      name: cstring
+      traceImpl: pointer
+      typeInfoV1: pointer
+      flags: int
+  type PNimType = ptr TNimTypeV2
+else:
+  # Need these for the runtime type information
+  include system/inclrtl, system/hti
 
 import ./nlvm_unwind
 
@@ -241,7 +253,7 @@ proc nlvmRaise(e: ref Exception, ename: cstring) {.compilerproc, noreturn.} =
   exc.nimException = e
 
   # Help keep Nim exception around
-  when declared(GC_ref): # But only when using gc!
+  when declared(GC_ref) and not defined(gcDestructors): # But only when using gc!
     GC_ref(e)
 
   # c_printf("ref %p\n", unsafeAddr exc)
@@ -304,6 +316,10 @@ proc nlvmGetCurrentException(): ref Exception {.compilerproc.} =
     if unwindException.isNil(): nil
     else: unwindException.toNimException()
 
+proc nlvmGetCurrentExceptionMsg(): string {.compilerproc.} =
+  let e = nlvmGetCurrentException()
+  e.msg
+
 proc nlvmBeginCatch(unwindArg: pointer) {.compilerproc, raises: [].} =
   # c_printf("begin catch %p\n", unwindArg)
   ehGlobals.closureException = nil  # Just in case, see workaround notes
@@ -357,6 +373,8 @@ proc nlvmEndCatch() {.compilerproc.} =
 
         when declared(GC_unref):
           GC_unref(exceptionHeader.toNimException())
+        when defined(gcDestructors):
+          GC_unref(exceptionHeader.toNimException())
 
         c_free(toNlvmException(unwindException))
   else:
@@ -389,12 +407,26 @@ type
     landingPad: pointer # null -> nothing found, else something found
     reason: UnwindReasonCode
 
-func canCatch(catchType, thrownType: PNimType, adjustedPtr: pointer): bool =
-  var tmp = thrownType
+when defined(gcDestructors):
+  proc memcmp(str1, str2: cstring, n: csize_t): cint {.importc, header: "<string.h>".}
 
-  while tmp != nil:
-    if tmp == catchType: return true
-    tmp = tmp.base
+  func endsWith(s, suffix: cstring): bool {.inline.} =
+    let
+      sLen = s.len
+      suffixLen = suffix.len
+
+    if suffixLen <= sLen:
+      result = memcmp(cstring(unsafeAddr s[sLen - suffixLen]), suffix, csize_t(suffixLen)) == 0
+
+  func canCatch(catchType, thrownType: PNimType, adjustedPtr: pointer): bool =
+    thrownType.name.endsWith(catchType.name)
+else:
+  func canCatch(catchType, thrownType: PNimType, adjustedPtr: pointer): bool =
+    var tmp = thrownType
+
+    while tmp != nil:
+      if tmp == catchType: return true
+      tmp = tmp.base
 
 func exceptionSpecCanCatch(
     specIndex: int, classInfo: pointer, ttypeEncoding: uint8,
