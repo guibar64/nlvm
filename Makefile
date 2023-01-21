@@ -11,9 +11,9 @@ NIMFLAGS=--debuginfo --linedir:on
 
 NLVMFLAGS= --debuginfo --linedir:on
 
-LLVM_MAJ=14
+LLVM_MAJ=15
 LLVM_MIN=0
-LLVM_PAT=0
+LLVM_PAT=6
 
 LLVM_DIR=llvm-$(LLVM_MAJ).$(LLVM_MIN).$(LLVM_PAT).src
 
@@ -47,10 +47,13 @@ $(NLVMR): $(LLVM_DEP) $(NIMC) Nim/compiler/*.nim  nlvm/*.nim llvm/*.nim nlvm-lib
 	cd nlvm && time ../$(NIMC) $(NIMFLAGS) -d:release $(NLVMCFLAGS) -o:nlvmr c nlvm
 
 nlvm/nlvm.ll: $(NLVMC) nlvm/*.nim llvm/*.nim nlvm-lib/*.nim
-	cd nlvm && time ./nlvm $(NLVMFLAGS) -o:nlvm.ll -c c nlvm
+	cd nlvm && time ./nlvm $(NLVMFLAGS) -o:nlvm.ll $(NLVMCFLAGS) -c c nlvm
 
 nlvm/nlvm.self: $(NLVMC)
 	cd nlvm && time ./nlvm -o:nlvm.self $(NLVMFLAGS) $(NLVMCFLAGS) c nlvm
+
+nlvm/nlvmr.self: $(NLVMR)
+	cd nlvm && time ./nlvmr -o:nlvmr.self -d:release $(NLVMFLAGS) $(NLVMCFLAGS) c nlvm
 
 nlvm/nlvm.self.ll: nlvm/nlvm.self
 	cd nlvm && time ./nlvm.self -c $(NLVMFLAGS) $(NLVMCFLAGS) -o:nlvm.self.ll c nlvm
@@ -64,7 +67,7 @@ Nim/testament/testament: $(NIMC) Nim/testament/*.nim
 
 .PHONY: run-testament
 run-testament: $(NLVMR) Nim/testament/testament
-	-cd Nim; time testament/testament --megatest:off --targets:c "--nim:../nlvm/nlvmr" --skipFrom:../skipped-tests.txt all
+	cd Nim; time testament/testament --megatest:off --targets:c "--nim:../nlvm/nlvmr" --skipFrom:../skipped-tests.txt all
 
 run-testament-noskip: $(NLVMR) Nim/testament/testament
 	-cd Nim; time testament/testament --megatest:off --targets:c "--nim:../nlvm/nlvmr" all
@@ -76,7 +79,7 @@ test: run-testament stats
 update-skipped: run-testament-noskip stats
 	-jq -s '{bad: ([.[][]|select(.result != "reSuccess" and .result != "reDisabled")]) | length, ok: ([.[][]|select(.result == "reSuccess")]|length)}' Nim/testresults/*json
 	# Output suitable for sticking into skipped-tests.txt
-	-jq -r -s '([.[][]|select(.result != "reSuccess" and .result != "reDisabled")]) | .[].name' Nim/testresults/*json | sed 's/ C.*//' | sort | uniq > skipped-tests.txt
+	-jq -r -s '([.[][]|select(.result != "reSuccess" and .result != "reDisabled")]) | .[].name' Nim/testresults/*json | sort | uniq > skipped-tests.txt
 
 .PHONY: badeggs.json
 badeggs.json:

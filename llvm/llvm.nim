@@ -2,13 +2,16 @@
 # Copyright (c) Jacek Sieka 2016
 # See the LICENSE file for license info (doh!)
 
-import strutils
+import strformat
 
 const
-  LLVMLib = "libLLVM-14.so"
-  LLVMRoot = "../ext/llvm-14.0.0.src/"
-  LLDRoot = "../ext/lld-14.0.0.src/"
-  LLVMVersion* = "14.0.0"
+  LLVMMaj = 15
+  LLVMMin = 0
+  LLVMPat = 6
+  LLVMVersion* = fmt"{LLVMMaj}.{LLVMMin}.{LLVMPat}"
+  LLVMLib = fmt"libLLVM-{LLVMMaj}.so"
+  LLVMRoot = fmt"../ext/llvm-{LLVMVersion}.src/"
+  LLDRoot = fmt"../ext/lld-{LLVMVersion}.src/"
 
 {.passL: "-llldELF" .}
 {.passL: "-llldWasm" .}
@@ -26,7 +29,7 @@ else:
   const
     LLVMOut = LLVMRoot & "sha/"
 
-  {.passL: "-lLLVM-14".}
+  {.passL: fmt"-lLLVM-{LLVMMaj}".}
   {.passL: "-Wl,'-rpath=$ORIGIN/" & LLVMOut & "lib/'".}
 
 {.passC: "-I" & LLVMRoot & "include".}
@@ -125,9 +128,20 @@ type
   TargetMachineRef* = ptr OpaqueTargetMachine
   PassManagerBuilderRef* = ptr OpaquePassManagerBuilder
 
+  ComdatSelectionKind* {.size: sizeof(cint).} = enum
+    AnyComdatSelectionKind,        ## The linker may choose any COMDAT.
+    ExactMatchComdatSelectionKind, ## The data referenced by the COMDAT must
+                                      ## be the same.
+    LargestComdatSelectionKind,    ## The linker will choose the largest
+                                      ## COMDAT.
+    NoDeduplicateComdatSelectionKind, ## No deduplication is performed.
+    SameSizeComdatSelectionKind ## The data referenced by the COMDAT must be
+                                    ## the same size.
+
 include llvm/Types
 include llvm/Support
 
+include llvm/Comdat
 include llvm/Core
 include llvm/DebugInfo
 include llvm/BitReader
@@ -253,28 +267,29 @@ proc nimSetMetadataGlobal*(
   val: ValueRef; kindID: cuint; node: ValueRef) {.importc: "LLVMNimSetMetadataGlobal".}
 
 proc nimLLDLinkElf*(
-  argv: cstringArray, argc: cint): cstring {.importc: "LLVMNimLLDLinkElf".}
+  argv: cstringArray, argc: csize_t): bool {.importc: "LLVMNimLLDLinkElf".}
 
-proc nimLLDLinkElf*(args: openArray[string]): string =
+proc nimLLDLinkElf*(args: openArray[string]): bool =
   let argv = allocCStringArray(args)
   defer: deallocCStringArray(argv)
 
-  let tmp = nimLLDLinkElf(argv, args.len.cint)
-  if not tmp.isNil:
-    result = strip($tmp)
-    disposeMessage(tmp)
+  nimLLDLinkElf(argv, args.len.csize_t)
 
 proc nimLLDLinkWasm*(
-  argv: cstringArray, argc: cint): cstring {.importc: "LLVMNimLLDLinkWasm".}
+  argv: cstringArray, argc: csize_t): bool {.importc: "LLVMNimLLDLinkWasm".}
 
-proc nimLLDLinkWasm*(args: openArray[string]): string =
+proc nimLLDLinkWasm*(args: openArray[string]): bool =
   let argv = allocCStringArray(args)
   defer: deallocCStringArray(argv)
 
-  let tmp = nimLLDLinkWasm(argv, args.len.cint)
-  if not tmp.isNil:
-    result = strip($tmp)
-    disposeMessage(tmp)
+  nimLLDLinkWasm(argv, args.len.csize_t)
+
+
+proc nimCreateTargetMachine*(t: TargetRef; triple: cstring; cpu: cstring;
+                         features: cstring; level: CodeGenOptLevel;
+                         reloc: RelocMode; codeModel: CodeModel): TargetMachineRef {.
+    importc: "LLVMNimCreateTargetMachine".}
+
 
 # A few helpers to make things more smooth
 
@@ -326,7 +341,7 @@ template asRaw(arr: untyped, body: untyped): untyped =
   let p {.inject.} = if s.len > 0: addr(s[0]) else: nil
   body
 
-proc functionType*(returnType: TypeRef, paramTypes: openarray[TypeRef],
+proc functionType*(returnType: TypeRef, paramTypes: openArray[TypeRef],
                    isVarArg = false): TypeRef =
   asRaw(paramTypes, functionType(returnType, p, n, if isVarArg: llvm.True else: llvm.False))
 
@@ -335,11 +350,11 @@ proc getParamTypes*(functionTy: TypeRef): seq[TypeRef] =
   if result.len > 0:
     functionTy.getParamTypes(addr(result[0]))
 
-proc structTypeInContext*(c: ContextRef, elementTypes: openarray[TypeRef],
+proc structTypeInContext*(c: ContextRef, elementTypes: openArray[TypeRef],
                           packed = False): TypeRef =
   asRaw(elementTypes, structTypeInContext(c, p, n, packed))
 
-proc structSetBody*(structTy: TypeRef; elementTypes: openarray[TypeRef];
+proc structSetBody*(structTy: TypeRef; elementTypes: openArray[TypeRef];
                     packed = False) =
   asRaw(elementTypes, structSetBody(structTy, p, n, packed))
 
@@ -354,22 +369,22 @@ proc pointerType*(elementType: TypeRef): TypeRef =
 proc constStringInContext*(c: ContextRef, s: string, dontNullTerminate = False): ValueRef =
   constStringInContext(c, s, s.len.cuint, dontNullTerminate)
 
-proc constStructInContext*(c: ContextRef, constantVals: openarray[ValueRef]; packed = False): ValueRef =
+proc constStructInContext*(c: ContextRef, constantVals: openArray[ValueRef]; packed = False): ValueRef =
   asRaw(constantVals, constStructInContext(c, p, n, packed))
 
-proc constArray*(t: TypeRef, constantVals: openarray[ValueRef]): ValueRef =
+proc constArray*(t: TypeRef, constantVals: openArray[ValueRef]): ValueRef =
   asRaw(constantVals, constArray(t, p, n))
 
 proc constNamedStruct*(structTy: TypeRef;
-                       constantVals: openarray[ValueRef]): ValueRef =
+                       constantVals: openArray[ValueRef]): ValueRef =
   asRaw(constantVals, constNamedStruct(structTy, p, n))
 
-proc constGEP*(constantVal: ValueRef;
-               constantIndices: openarray[ValueRef]): ValueRef =
-  asRaw(constantIndices, constGEP(constantVal, p, n))
+proc constGEP2*(ty: TypeRef, constantVal: ValueRef;
+                constantIndices: openArray[ValueRef]): ValueRef =
+  asRaw(constantIndices, constGEP2(ty, constantVal, p, n))
 
-proc addIncoming*(phiNode: ValueRef; incomingValues: openarray[ValueRef];
-                  incomingBlocks: openarray[BasicBlockRef]) =
+proc addIncoming*(phiNode: ValueRef; incomingValues: openArray[ValueRef];
+                  incomingBlocks: openArray[BasicBlockRef]) =
   var s0 = @incomingValues
   let n0 = s0.len.cuint
   let p0 = if s0.len > 0: addr(s0[0]) else: nil
@@ -377,22 +392,25 @@ proc addIncoming*(phiNode: ValueRef; incomingValues: openarray[ValueRef];
   let p1 = if s1.len > 0: addr(s1[0]) else: nil
   addIncoming(phiNode, p0, p1, n0)
 
-proc buildGEP*(b: BuilderRef; pointer: ValueRef; indices: openarray[ValueRef];
-               name: cstring = ""): ValueRef =
-  asRaw(indices, buildGEP(b, pointer, p, n, name))
+proc buildGEP2*(
+    b: BuilderRef; ty: TypeRef, pointer: ValueRef; indices: openArray[ValueRef];
+    name: cstring): ValueRef =
+  asRaw(indices, buildGEP2(b, ty, pointer, p, n, name))
 
-proc buildInBoundsGEP*(b: BuilderRef; pointer: ValueRef; indices: openarray[ValueRef];
-               name: cstring = ""): ValueRef =
-  asRaw(indices, buildInBoundsGEP(b, pointer, p, n, name))
+proc buildInBoundsGEP2*(
+    b: BuilderRef; ty: TypeRef, pointer: ValueRef; indices: openArray[ValueRef];
+    name: cstring): ValueRef =
+  asRaw(indices, buildInBoundsGEP2(b, ty, pointer, p, n, name))
 
-proc buildCall*(a2: BuilderRef; fn: ValueRef; args: openarray[ValueRef];
-                name: cstring = ""): ValueRef =
-  asRaw(args, buildCall(a2, fn, p, n, name))
+proc buildCall2*(
+    b: BuilderRef; ty: TypeRef, fn: ValueRef; args: openArray[ValueRef];
+    name: cstring): ValueRef =
+  asRaw(args, buildCall2(b, ty, fn, p, n, name))
 
-proc buildInvoke*(a1: BuilderRef; fn: ValueRef;
+proc buildInvoke2*(b: BuilderRef; ty: TypeRef, fn: ValueRef;
     args: openArray[ValueRef]; then: BasicBlockRef; catch: BasicBlockRef;
     name: cstring = ""): ValueRef =
-  asRaw(args, buildInvoke(a1, fn, p, n, then, catch, name))
+  asRaw(args, buildInvoke2(b, ty, fn, p, n, then, catch, name))
 
 proc diBuilderCreateFile*(builder: DIBuilderRef, filename: string, directory: string): MetadataRef =
   diBuilderCreateFile(builder, filename.cstring, filename.len.csize_t,
@@ -413,7 +431,6 @@ proc getMDKindIDInContext*(c: ContextRef, name: string): cuint =
 
 proc createStringAttribute*(c: ContextRef, k, v: string): AttributeRef =
   createStringAttribute(c, k.cstring, k.len.cuint, v.cstring, v.len.cuint)
-
 
 proc appendBasicBlockInContext*(
     b: BuilderRef, c: ContextRef, name: cstring): BasicBlockRef =
